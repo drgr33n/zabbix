@@ -1,27 +1,28 @@
 /*
-** Zabbix
-** Copyright (C) 2001-2019 Zabbix SIA
-**
-** This program is free software; you can redistribute it and/or modify
-** it under the terms of the GNU General Public License as published by
-** the Free Software Foundation; either version 2 of the License, or
-** (at your option) any later version.
-**
-** This program is distributed in the hope that it will be useful,
-** but WITHOUT ANY WARRANTY; without even the implied warranty of
-** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-** GNU General Public License for more details.
-**
-** You should have received a copy of the GNU General Public License
-** along with this program; if not, write to the Free Software
-** Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-**/
+ ** Zabbix
+ ** Copyright (C) 2001-2019 Zabbix SIA
+ **
+ ** This program is free software; you can redistribute it and/or modify
+ ** it under the terms of the GNU General Public License as published by
+ ** the Free Software Foundation; either version 2 of the License, or
+ ** (at your option) any later version.
+ **
+ ** This program is distributed in the hope that it will be useful,
+ ** but WITHOUT ANY WARRANTY; without even the implied warranty of
+ ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ ** GNU General Public License for more details.
+ **
+ ** You should have received a copy of the GNU General Public License
+ ** along with this program; if not, write to the Free Software
+ ** Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ **/
 
 package com.zabbix.gateway;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
+import java.util.List;
 
 import javax.management.InstanceNotFoundException;
 import javax.management.MBeanAttributeInfo;
@@ -29,6 +30,7 @@ import javax.management.MBeanServerConnection;
 import javax.management.ObjectName;
 import javax.management.openmbean.CompositeData;
 import javax.management.openmbean.TabularDataSupport;
+import javax.management.openmbean.TabularData;
 import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXServiceURL;
 
@@ -245,8 +247,79 @@ class JMXItemChecker extends ItemChecker
 				throw new ZabbixException("Data object type cannot be converted to string.");
 			}
 		}
+		if (dataObject instanceof TabularData)
+		{
+			logger.trace("'{}' contains tabular data", dataObject);
+			TabularData td = (TabularData)dataObject;
+			Object foundData = null;
 
-		if (dataObject instanceof CompositeData)
+			String dataObjectName;
+			String newFieldNames = "";
+
+			int sep = HelperFunctionChest.separatorIndex(fieldNames);
+
+			if (-1 != sep)
+			{
+				dataObjectName = fieldNames.substring(0, sep);
+				newFieldNames = fieldNames.substring(sep + 1);
+			}
+			else
+				dataObjectName = fieldNames;
+
+			// unescape possible dots or backslashes that were escaped by user
+			dataObjectName = HelperFunctionChest.unescapeUserInput(dataObjectName);
+
+			String[] tdKeys = dataObjectName.split(",");
+			logger.trace("aforementioned data object contains TabularData; looking for '{}' with keys '{}'",
+					dataObjectName, tdKeys);
+			for (Object sKey : td.keySet())
+			{
+				List<?> sKey1 = (List<?>)sKey;
+				if (sKey1.size() != tdKeys.length)
+				{
+					logger.trace("provided key length mismatch. got {} but expected {}. Pequested key: {}, found key: {}",
+							new Object[] { tdKeys.length, sKey1.size(), dataObjectName, sKey});
+					throw new ZabbixException("TabularData key length mismatch. Expected: {}", sKey1.size());
+				}
+				boolean sKeyCheck = true;
+				for (int i = 0; i < tdKeys.length && sKeyCheck; i++)
+				{
+					if (!tdKeys[i].toString().equals(sKey1.get(i).toString()))
+					{
+						sKeyCheck = false;
+					}
+				}
+				if (sKeyCheck)
+				{
+					foundData = td.get(sKey1.toArray());
+				}
+			}
+			if ( foundData != null)
+			{
+				if (foundData instanceof CompositeData)
+				{
+					CompositeData comp = (CompositeData)foundData;
+					if (comp.get("key").equals(dataObjectName)) {
+						return getPrimitiveAttributeValue(comp.get("value"), newFieldNames);
+					}
+					else
+					{
+						return getPrimitiveAttributeValue(foundData, newFieldNames);
+					}
+				}
+				else {
+					logger.trace("Found key: {} and continuing with: {}", dataObjectName, foundData);
+					return getPrimitiveAttributeValue(foundData, newFieldNames);
+				}
+			}
+			else
+			{
+				logger.error("Could not find TabularData key {}", dataObjectName);
+				logger.info("Available keys: {}", td.keySet());
+				throw new ZabbixException("Could not find key {} in tabular data", dataObjectName);
+			}
+		}
+		else if (dataObject instanceof CompositeData)
 		{
 			logger.trace("'{}' contains composite data", dataObject);
 
@@ -267,7 +340,6 @@ class JMXItemChecker extends ItemChecker
 
 			// unescape possible dots or backslashes that were escaped by user
 			dataObjectName = HelperFunctionChest.unescapeUserInput(dataObjectName);
-
 			return getPrimitiveAttributeValue(comp.get(dataObjectName), newFieldNames);
 		}
 		else
@@ -375,13 +447,14 @@ class JMXItemChecker extends ItemChecker
 	private boolean isPrimitiveAttributeType(Object obj) throws NoSuchMethodException
 	{
 		Class<?>[] clazzez = {Boolean.class, Character.class, Byte.class, Short.class, Integer.class, Long.class,
-			Float.class, Double.class, String.class, java.math.BigDecimal.class, java.math.BigInteger.class,
-			java.util.Date.class, javax.management.ObjectName.class, java.util.concurrent.atomic.AtomicBoolean.class,
-			java.util.concurrent.atomic.AtomicInteger.class, java.util.concurrent.atomic.AtomicLong.class};
+				Float.class, Double.class, String.class, java.math.BigDecimal.class, java.math.BigInteger.class,
+				java.util.Date.class, javax.management.ObjectName.class, java.util.concurrent.atomic.AtomicBoolean.class,
+				java.util.concurrent.atomic.AtomicInteger.class, java.util.concurrent.atomic.AtomicLong.class};
 
 		// check if the type is either primitive or overrides toString()
 		return HelperFunctionChest.arrayContains(clazzez, obj.getClass()) ||
 				(!(obj instanceof CompositeData)) && (!(obj instanceof TabularDataSupport)) &&
-				(obj.getClass().getMethod("toString").getDeclaringClass() != Object.class);
+						(obj.getClass().getMethod("toString").getDeclaringClass() != Object.class);
 	}
 }
+
